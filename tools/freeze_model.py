@@ -1,18 +1,21 @@
 # vim: expandtab:ts=4:sw=4
 import argparse
+import cv2
+import os
+import numpy as np
 import tensorflow as tf
-import tensorflow.contrib.slim as slim
+import tf_slim as slim
 
 
 def _batch_norm_fn(x, scope=None):
     if scope is None:
-        scope = tf.get_variable_scope().name + "/bn"
+        scope = tf.compat.v1.get_variable_scope().name + "/bn"
     return slim.batch_norm(x, scope=scope)
 
 
 def create_link(
         incoming, network_builder, scope, nonlinearity=tf.nn.elu,
-        weights_initializer=tf.truncated_normal_initializer(stddev=1e-3),
+        weights_initializer=tf.compat.v1.truncated_normal_initializer(stddev=1e-3),
         regularizer=None, is_first=False, summarize_activations=True):
     if is_first:
         network = incoming
@@ -42,7 +45,7 @@ def create_link(
 
 def create_inner_block(
         incoming, scope, nonlinearity=tf.nn.elu,
-        weights_initializer=tf.truncated_normal_initializer(1e-3),
+        weights_initializer=tf.compat.v1.truncated_normal_initializer(1e-3),
         bias_initializer=tf.zeros_initializer(), regularizer=None,
         increase_dim=False, summarize_activations=True):
     n = incoming.get_shape().as_list()[-1]
@@ -70,7 +73,7 @@ def create_inner_block(
 
 
 def residual_block(incoming, scope, nonlinearity=tf.nn.elu,
-                   weights_initializer=tf.truncated_normal_initializer(1e3),
+                   weights_initializer=tf.compat.v1.truncated_normal_initializer(1e3),
                    bias_initializer=tf.zeros_initializer(), regularizer=None,
                    increase_dim=False, is_first=False,
                    summarize_activations=True):
@@ -87,15 +90,15 @@ def residual_block(incoming, scope, nonlinearity=tf.nn.elu,
 
 def _create_network(incoming, reuse=None, weight_decay=1e-8):
     nonlinearity = tf.nn.elu
-    conv_weight_init = tf.truncated_normal_initializer(stddev=1e-3)
+    conv_weight_init = tf.compat.v1.truncated_normal_initializer(stddev=1e-3)
     conv_bias_init = tf.zeros_initializer()
     conv_regularizer = slim.l2_regularizer(weight_decay)
-    fc_weight_init = tf.truncated_normal_initializer(stddev=1e-3)
+    fc_weight_init = tf.compat.v1.truncated_normal_initializer(stddev=1e-3)
     fc_bias_init = tf.zeros_initializer()
     fc_regularizer = slim.l2_regularizer(weight_decay)
 
     def batch_norm_fn(x):
-        return slim.batch_norm(x, scope=tf.get_variable_scope().name + "/bn")
+        return slim.batch_norm(x, scope=tf.compat.v1.get_variable_scope().name + "/bn")
 
     network = incoming
     network = slim.conv2d(
@@ -176,6 +179,31 @@ def _preprocess(image):
     image = image[:, :, ::-1]  # BGR to RGB
     return image
 
+quant_dataset = ""
+
+def representative_data_gen():
+  lines = open(quant_dataset).read().split("\n")
+  line = 0
+  found = 0
+  samples = 100
+  
+  for input_value in range(samples):
+    line += 1
+    file = lines[input_value].split(" ")[0]
+
+    if os.path.exists(file):
+      original_image = cv2.imread(file)
+      original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+      img_in = original_image[np.newaxis, ...].astype(np.float32)
+      print("Reading calibration image {}".format(file))
+      found += 1
+      yield [img_in]
+    else:
+      print("File does not exist %s in %s at line %d" % (file, FLAGS.dataset, line))
+      continue
+
+  if found < samples:
+    raise ValueError("Failed to read %d calibration sample images from %s" % (samples, FLAGS.dataset))
 
 def parse_args():
     """Parse command line arguments.
@@ -188,14 +216,30 @@ def parse_args():
     parser.add_argument(
         "--graphdef_out",
         default="resources/networks/mars-small128.pb")
+    parser.add_argument(
+        "--lite",
+        action='store_true')
+    parser.add_argument(
+        "--lite_out",
+        default="resources/networks/mars-small128.tflite")
+    parser.add_argument(
+        "--dataset",
+        default="quant-dataset.txt")
+    parser.add_argument(
+        "--int8io",
+        action='store_true')
+    parser.add_argument(
+        "--quantized",
+        action='store_true')
+    
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    with tf.Session(graph=tf.Graph()) as session:
-        input_var = tf.placeholder(
+    with tf.compat.v1.Session(graph=tf.Graph()) as session:
+        input_var = tf.compat.v1.placeholder(
             tf.uint8, (None, 128, 64, 3), name="images")
         image_var = tf.map_fn(
             lambda x: _preprocess(x), tf.cast(input_var, tf.float32),
@@ -205,14 +249,34 @@ def main():
         features, _ = factory_fn(image_var, reuse=None)
         features = tf.identity(features, name="features")
 
-        saver = tf.train.Saver(slim.get_variables_to_restore())
+        saver = tf.compat.v1.train.Saver(slim.get_variables_to_restore())
         saver.restore(session, args.checkpoint_in)
 
-        output_graph_def = tf.graph_util.convert_variables_to_constants(
-            session, tf.get_default_graph().as_graph_def(),
+        output_graph_def = tf.compat.v1.graph_util.convert_variables_to_constants(
+            session, tf.compat.v1.get_default_graph().as_graph_def(),
             [features.name.split(":")[0]])
-        with tf.gfile.GFile(args.graphdef_out, "wb") as file_handle:
-            file_handle.write(output_graph_def.SerializeToString())
+        if (False == args.lite) :
+            with tf.compat.v1.gfile.GFile(args.graphdef_out, "wb") as file_handle:
+                file_handle.write(output_graph_def.SerializeToString())
+                pass
+        else :
+            global quant_dataset;
+            quant_dataset = args.dataset;
+            input0 = session.graph.get_tensor_by_name("map/TensorArrayV2Stack/TensorListStack:0");
+            output0 = session.graph.get_tensor_by_name("features:0")
+            converter = tf.compat.v1.lite.TFLiteConverter.from_session(session, [input0], [output0])
+            if (args.quantized) :
+                converter.optimizations = [tf.lite.Optimize.DEFAULT]
+            else :
+                converter.optimizations = [None]
+            if args.int8io == True :
+                converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+                converter.inference_input_type = tf.int8
+                converter.inference_output_type = tf.int8
+                
+            converter.representative_dataset = representative_data_gen
+            tflite_model = converter.convert()
+            open(args.lite_out, "wb").write(tflite_model)
 
 
 if __name__ == "__main__":

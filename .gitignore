@@ -87,3 +87,6 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+MOT16/
+caps/

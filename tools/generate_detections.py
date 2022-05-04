@@ -72,15 +72,15 @@ class ImageEncoder(object):
 
     def __init__(self, checkpoint_filename, input_name="images",
                  output_name="features"):
-        self.session = tf.Session()
-        with tf.gfile.GFile(checkpoint_filename, "rb") as file_handle:
-            graph_def = tf.GraphDef()
+        self.session = tf.compat.v1.Session()
+        with tf.io.gfile.GFile(checkpoint_filename, "rb") as file_handle:
+            graph_def = tf.compat.v1.GraphDef()
             graph_def.ParseFromString(file_handle.read())
         tf.import_graph_def(graph_def, name="net")
-        self.input_var = tf.get_default_graph().get_tensor_by_name(
-            "net/%s:0" % input_name)
-        self.output_var = tf.get_default_graph().get_tensor_by_name(
-            "net/%s:0" % output_name)
+        self.input_var = tf.compat.v1.get_default_graph().get_tensor_by_name(
+            "%s:0" % input_name)
+        self.output_var = tf.compat.v1.get_default_graph().get_tensor_by_name(
+            "%s:0" % output_name)
 
         assert len(self.output_var.get_shape()) == 2
         assert len(self.input_var.get_shape()) == 4
@@ -100,18 +100,24 @@ def create_box_encoder(model_filename, input_name="images",
     image_encoder = ImageEncoder(model_filename, input_name, output_name)
     image_shape = image_encoder.image_shape
 
-    def encoder(image, boxes):
+    def encoder(image, boxes, save_img):
         image_patches = []
         for box in boxes:
             patch = extract_image_patch(image, box, image_shape[:2])
+            if (save_img) :
+                name = "caps/box-%d.png" % encoder.idx
+                cv2.imwrite(name, patch)
+                encoder.idx = encoder.idx + 1
             if patch is None:
                 print("WARNING: Failed to extract image patch: %s." % str(box))
                 patch = np.random.uniform(
                     0., 255., image_shape).astype(np.uint8)
             image_patches.append(patch)
         image_patches = np.asarray(image_patches)
+        #np.save("caps/patches.npy", image_patches)
         return image_encoder(image_patches, batch_size)
 
+    encoder.idx = 0
     return encoder
 
 
@@ -162,6 +168,7 @@ def generate_detections(encoder, mot_dir, output_dir, detection_dir=None):
         frame_indices = detections_in[:, 0].astype(np.int)
         min_frame_idx = frame_indices.astype(np.int).min()
         max_frame_idx = frame_indices.astype(np.int).max()
+        save_img = True
         for frame_idx in range(min_frame_idx, max_frame_idx + 1):
             print("Frame %05d/%05d" % (frame_idx, max_frame_idx))
             mask = frame_indices == frame_idx
@@ -172,7 +179,11 @@ def generate_detections(encoder, mot_dir, output_dir, detection_dir=None):
                 continue
             bgr_image = cv2.imread(
                 image_filenames[frame_idx], cv2.IMREAD_COLOR)
-            features = encoder(bgr_image, rows[:, 2:6].copy())
+            features = encoder(bgr_image, rows[:, 2:6].copy(), save_img)
+            save_img = False
+            name = os.path.splitext(os.path.basename(image_filenames[frame_idx]))[0]
+            name = "caps/" + name
+            #np.save(name, features)
             detections_out += [np.r_[(row, feature)] for row, feature
                                in zip(rows, features)]
 
